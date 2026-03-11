@@ -5,3 +5,7 @@ cdk.out
 .DS_Store
 mothership
 __pycache__
+
+
+.idea
+.local/
