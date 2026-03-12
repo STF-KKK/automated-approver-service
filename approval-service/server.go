@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -258,22 +259,26 @@ func (s *Server) Confirm(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
-	if genericIntent.OperationType != "transfer" && genericIntent.OperationType != "call smart contract" && genericIntent.OperationType != "deploy contract" && genericIntent.OperationType != "sign raw transaction" {
+	supportedOps := map[string]bool{
+		"transfer":              true,
+		"call smart contract":   true,
+		"deploy smart contract": true,
+		"make transaction":      true,
+	}
+	if !supportedOps[genericIntent.OperationType] {
 		s.logger.Warn().
 			Str("operationType", genericIntent.OperationType).
 			RawJSON("intent", genericIntent.Intent).
 			Msg("unsupported operation type requested")
-		return echo.NewHTTPError(http.StatusNotImplemented, "only 'transfer', 'call smart contract', 'deploy contract', and 'sign raw transaction' are supported")
+		return echo.NewHTTPError(http.StatusNotImplemented, "unsupported operation type: "+genericIntent.OperationType)
 	}
 
-	// Handle different operation types, perform basic checks, and pretty print
-	// the decoded intent. The "checks" here are intentionally minimal and serve
-	// as a hook for more advanced policies.
-	var (
-		signature []byte
-		err       error
-	)
+	var signature []byte
+	var err error
 
+	// Validate, check, and sign per operation type.
+	// Each case gates signing behind its own checks so that a failed check
+	// prevents the signature from being produced.
 	switch genericIntent.OperationType {
 	case "transfer":
 		var transferIntent TransferIntent
@@ -299,7 +304,15 @@ func (s *Server) Confirm(c echo.Context) error {
 			)
 		}
 
-		// Pretty print the transfer intent
+		if err := s.checkTransferIntent(transferIntent); err != nil {
+			s.logger.Warn().
+				Err(err).
+				Str("operationType", genericIntent.OperationType).
+				RawJSON("intent", genericIntent.Intent).
+				Msg("transfer intent did not pass automated checks")
+			return echo.NewHTTPError(http.StatusForbidden, err.Error())
+		}
+
 		intentJSON, _ := json.MarshalIndent(transferIntent, "", "  ")
 		fmt.Printf("\n=== TRANSFER INTENT ===\n%s\n", string(intentJSON))
 
@@ -320,13 +333,12 @@ func (s *Server) Confirm(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())
 		}
 
-		// Pretty print the contract call intent
 		intentJSON, _ := json.MarshalIndent(callContractIntent, "", "  ")
 		fmt.Printf("\n=== CONTRACT CALL INTENT ===\n%s\n", string(intentJSON))
 
 		signature, err = signIntent(s.privateKey, genericIntent.Intent)
 
-	case "deploy contract":
+	case "deploy smart contract":
 		var deployContractIntent DeployContractIntent
 		if err := json.Unmarshal(genericIntent.Intent, &deployContractIntent); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
@@ -341,36 +353,40 @@ func (s *Server) Confirm(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())
 		}
 
-		// Pretty print the contract deploy intent
 		intentJSON, _ := json.MarshalIndent(deployContractIntent, "", "  ")
 		fmt.Printf("\n=== CONTRACT DEPLOY INTENT ===\n%s\n", string(intentJSON))
 
 		signature, err = signIntent(s.privateKey, genericIntent.Intent)
 
-	case "sign raw transaction":
-		var rawTxIntent SignRawTransactionIntent
-		if err := json.Unmarshal(genericIntent.Intent, &rawTxIntent); err != nil {
+	case "make transaction":
+		var makeTxIntent MakeTransactionIntent
+		if err := json.Unmarshal(genericIntent.Intent, &makeTxIntent); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 
-		if err := s.checkSignRawTransactionIntent(rawTxIntent); err != nil {
+		if err := s.checkMakeTransactionIntent(makeTxIntent); err != nil {
 			s.logger.Warn().
 				Err(err).
 				Str("operationType", genericIntent.OperationType).
 				RawJSON("intent", genericIntent.Intent).
-				Msg("sign raw transaction intent did not pass automated checks")
+				Msg("make transaction intent did not pass automated checks")
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())
 		}
 
-		// Pretty print the raw transaction intent
-		intentJSON, _ := json.MarshalIndent(rawTxIntent, "", "  ")
-		fmt.Printf("\n=== SIGN RAW TRANSACTION INTENT ===\n%s\n", string(intentJSON))
+		intentJSON, _ := json.MarshalIndent(makeTxIntent, "", "  ")
+		fmt.Printf("\n=== MAKE TRANSACTION INTENT ===\n%s\n", string(intentJSON))
+
+		if strings.EqualFold(makeTxIntent.Asset, "CC") && makeTxIntent.RawTransaction != "" {
+			if decoded, err := decodeProtoWireFromBase64(makeTxIntent.RawTransaction); err != nil {
+				s.logger.Warn().Err(err).Msg("failed to decode CC RawTransaction as protobuf wire format")
+			} else if decodedJSON, err := json.MarshalIndent(decoded, "", "  "); err == nil {
+				fmt.Printf("\n=== DECODED RAW TX (PROTO WIRE, CC) ===\n%s\n", string(decodedJSON))
+			}
+		}
 
 		signature, err = signIntent(s.privateKey, genericIntent.Intent)
 
 	default:
-		// We already guard against unsupported operation types above, but keep a
-		// default to make the switch exhaustive.
 		return echo.NewHTTPError(http.StatusNotImplemented, "unsupported operation type")
 	}
 
@@ -449,13 +465,20 @@ func (s *Server) checkDeployContractIntent(intent DeployContractIntent) error {
 	return nil
 }
 
-// checkSignRawTransactionIntent contains demo logic for sign-raw-tx operations.
-func (s *Server) checkSignRawTransactionIntent(intent SignRawTransactionIntent) error {
+// checkMakeTransactionIntent contains demo logic for "make transaction" operations.
+// MPA promotes SignRawTransactionIntent into this form (TransactionIntent) before
+// sending it to automated approvers. The intent carries the full transaction
+// context including source, destinations, and optional raw transaction bytes.
+func (s *Server) checkMakeTransactionIntent(intent MakeTransactionIntent) error {
 	s.logger.Info().
 		Str("operation_id", intent.OperationID).
 		Str("asset", intent.Asset).
 		Bool("test_network", intent.TestNetwork).
-		Msg("evaluating sign raw transaction intent")
+		Str("source_master_key", intent.Source.MasterKeyName).
+		Str("source_account", intent.Source.AccountName).
+		Int("destination_count", len(intent.Destination)).
+		Bool("has_raw_tx", intent.RawTransaction != "").
+		Msg("evaluating make transaction intent")
 
 	return nil
 }
