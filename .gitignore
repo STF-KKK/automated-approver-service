@@ -9,3 +9,4 @@ __pycache__
 
 .idea
 .local/
+infra/config/config_local.cue
