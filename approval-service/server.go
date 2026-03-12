@@ -21,6 +21,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Server hosts the HTTP API for the automated approver service.
+// It exposes endpoints that MPA can call to obtain an approval signature
+// for a given enriched intent.
+//
+// This implementation is intentionally simple and is meant to be used as a
+// reference / demo service that teams can extend with their own policy logic.
 type Server struct {
 	echo   *echo.Echo
 	logger zerolog.Logger
@@ -208,6 +214,8 @@ type SignOperationRequest struct {
 func (s SignOperationRequest) Validate() error {
 	return validation.ValidateStruct(&s,
 		validation.Field(&s.EnrichedIntent, validation.Required),
+		// TODO: Uncomment this when MPA is updated to require the signature
+		//validation.Field(&s.MPASignature, validation.Required),
 	)
 }
 
@@ -216,9 +224,22 @@ type SignOperationResponse struct {
 	Signature []byte
 }
 
+// Confirm is the main entry point used by MPA to request an approval.
+// The flow is:
+//  1. Bind and validate the request payload.
+//  2. Decode the enriched intent into a GenericIntent wrapper.
+//  3. Perform basic, operation-type-specific checks against the intent.
+//  4. If all checks pass, sign the raw intent bytes and return the signature.
+//
+// NOTE: The checks in this file are deliberately lightweight and are meant
+// to be a starting point. In a real deployment, teams are expected to
+// extend the per-operation-type checks with their own policy rules.
 func (s *Server) Confirm(c echo.Context) error {
 	var body SignOperationRequest
 	if err := c.Bind(&body); err != nil {
+		s.logger.Error().
+			Err(err).
+			Msg("failed to bind SignOperationRequest")
 		return err
 	}
 
@@ -227,7 +248,14 @@ func (s *Server) Confirm(c echo.Context) error {
 	}
 
 	var genericIntent GenericIntent
+
+	// EnrichedIntent is a generic wrapper which contains the actual intent
+	// under GenericIntent.Intent and some metadata (rate info, initiator, etc).
 	if err := json.Unmarshal(body.EnrichedIntent, &genericIntent); err != nil {
+		s.logger.Error().
+			Err(err).
+			RawJSON("enriched_intent", body.EnrichedIntent).
+			Msg("failed to unmarshal EnrichedIntent into GenericIntent")
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
@@ -240,6 +268,7 @@ func (s *Server) Confirm(c echo.Context) error {
 	if !supportedOps[genericIntent.OperationType] {
 		s.logger.Warn().
 			Str("operationType", genericIntent.OperationType).
+			RawJSON("intent", genericIntent.Intent).
 			Msg("unsupported operation type requested")
 		return echo.NewHTTPError(http.StatusNotImplemented, "unsupported operation type: "+genericIntent.OperationType)
 	}
@@ -255,6 +284,17 @@ func (s *Server) Confirm(c echo.Context) error {
 		var transferIntent TransferIntent
 		if err := json.Unmarshal(genericIntent.Intent, &transferIntent); err != nil {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
+
+		// Fake/demo check: this is where more complex business logic can be
+		// plugged in (e.g. max amount per asset, whitelists, risk scoring, etc).
+		if err := s.checkTransferIntent(transferIntent); err != nil {
+			s.logger.Warn().
+				Err(err).
+				Str("operationType", genericIntent.OperationType).
+				RawJSON("intent", genericIntent.Intent).
+				Msg("transfer intent did not pass automated checks")
+			return echo.NewHTTPError(http.StatusForbidden, err.Error())
 		}
 
 		if len(transferIntent.DestinationAmounts) == 0 {
