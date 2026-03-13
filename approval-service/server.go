@@ -470,15 +470,22 @@ func (s *Server) checkDeployContractIntent(intent DeployContractIntent) error {
 // sending it to automated approvers. The intent carries the full transaction
 // context including source, destinations, and optional raw transaction bytes.
 func (s *Server) checkMakeTransactionIntent(intent MakeTransactionIntent) error {
-	s.logger.Info().
+	logEvent := s.logger.Info().
 		Str("operation_id", intent.OperationID).
 		Str("asset", intent.Asset).
 		Bool("test_network", intent.TestNetwork).
 		Str("source_master_key", intent.Source.MasterKeyName).
 		Str("source_account", intent.Source.AccountName).
 		Int("destination_count", len(intent.Destination)).
-		Bool("has_raw_tx", intent.RawTransaction != "").
-		Msg("evaluating make transaction intent")
+		Bool("has_raw_tx", intent.RawTransaction != "")
+
+	if intent.EVM != nil {
+		logEvent = logEvent.
+			Bool("has_evm_spec", true).
+			Str("evm_data", intent.EVM.Data)
+	}
+
+	logEvent.Msg("evaluating make transaction intent")
 
 	return nil
 }

@@ -70,9 +70,26 @@ type MakeTransactionIntent struct {
 		Address       string `json:"Address,omitempty"`
 		Amount        string `json:"Amount"`
 	} `json:"Destination"`
-	RawTransaction string          `json:"RawTransaction,omitempty"`
-	TxHash         string          `json:"TxHash,omitempty"`
-	BlockchainSpec json.RawMessage `json:"BlockchainSpec,omitempty"`
+	RawTransaction string `json:"RawTransaction,omitempty"`
+	TxHash         string `json:"TxHash,omitempty"`
+
+	// BlockchainSpec fields are embedded (promoted) in MPA's TransactionIntent,
+	// so they appear at the top level of the JSON, not nested under "BlockchainSpec".
+	EVM       *EVMSpec        `json:"EVM,omitempty"`
+	Bitcoin   json.RawMessage `json:"Bitcoin,omitempty"`
+	Substrate json.RawMessage `json:"Substrate,omitempty"`
+	Solana    json.RawMessage `json:"Solana,omitempty"`
+	TVM       json.RawMessage `json:"TVM,omitempty"`
+	Canton    json.RawMessage `json:"Canton,omitempty"`
+	Stellar   json.RawMessage `json:"Stellar,omitempty"`
+}
+
+type EVMSpec struct {
+	Gas                  json.Number `json:"Gas,omitempty"`
+	MaxPriorityFeePerGas json.Number `json:"MaxPriorityFeePerGas,omitempty"`
+	MaxFeePerGas         json.Number `json:"MaxFeePerGas,omitempty"`
+	Nonce                json.Number `json:"Nonce,omitempty"`
+	Data                 string      `json:"Data,omitempty"`
 }
 
 type GenericIntent struct {
